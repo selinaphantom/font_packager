@@ -14,7 +14,6 @@ import fontforge
 
 
 
-
 EM_SIZE = 1000
 ASCENT = 800
 DESCENT = 200
