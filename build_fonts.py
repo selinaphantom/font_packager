@@ -1,11 +1,12 @@
-
 import os
 import sys
 import time
 import csv
+import argparse
 import zipfile
 import tempfile
 import unicodedata
+
 from pathlib import PurePosixPath
 from collections import defaultdict
 
@@ -13,22 +14,6 @@ import fontforge
 
 
 
-ZIP_PATH = sys.argv[1] if len(sys.argv) > 1 else "font.zip"
-
-OUTPUT_DIR = sys.argv[2] if len(sys.argv) > 2 else "output_fonts"
-
-STYLES = {
-    "工整": {
-        "family": "MyFont Neat",
-        "fontname": "MyFontNeat",
-        "output": "MyFont_Neat.ttf"
-    },
-    "潦草": {
-        "family": "MyFont Handwriting",
-        "fontname": "MyFontHandwriting",
-        "output": "MyFont_Handwriting.ttf"
-    }
-}
 
 EM_SIZE = 1000
 ASCENT = 800
@@ -36,6 +21,46 @@ DESCENT = 200
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="FontForge ZIP 字型產生工具"
+    )
+
+    parser.add_argument("--zip", required=True,
+                        help="輸入 ZIP 檔案")
+
+    parser.add_argument("--folder",
+                        help="ZIP 裡面要轉換的資料夾")
+
+    parser.add_argument("--family",
+                        help="字型家族名稱")
+
+    parser.add_argument("--fontname",
+                        help="PostScript 字型名稱")
+
+    parser.add_argument("--output",
+                        help="輸出的 TTF 檔名")
+
+    parser.add_argument("--output-dir",
+                        default="output_fonts",
+                        help="輸出資料夾")
+
+    parser.add_argument("--list-folders",
+                        action="store_true",
+                        help="列出 ZIP 裡的資料夾")
+
+    return parser.parse_args()
+
+def list_zip_folders(zip_path):
+    folders = set()
+
+    with zipfile.ZipFile(zip_path, "r") as z:
+        for name in z.namelist():
+            if name.lower().endswith(".svg"):
+                folders.add(os.path.dirname(name))
+
+    for folder in sorted(folders):
+        print(folder)
 
 def get_unicode(filename):
 
@@ -61,18 +86,19 @@ def glyph_name(codepoint):
 
 
 
-def load_overrides():
-
-
+def load_overrides(output_dir, folder):
     overrides = {}
 
-    path = os.path.join(OUTPUT_DIR, "overrides.csv")
+    path = os.path.join(output_dir, "overrides.csv")
 
     if not os.path.exists(path):
         return overrides
 
     with open(path, "r", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
+            if row["folder"] != folder:
+                continue
+
             value = row["codepoint"].strip().upper()
 
             if value.startswith("U+"):
@@ -80,18 +106,18 @@ def load_overrides():
             else:
                 cp = int(value, 0)
 
-            overrides[
-                (row["style"], row["filename"])
-            ] = cp
+            overrides[row["filename"]] = cp
 
     return overrides
 
 
 
-def scan_svg(zip_file, overrides):
+def scan_svg(zip_file, folder, overrides):
 
-    result = defaultdict(list)
+    result = []
     report = []
+
+    folder = folder.strip("/")
 
     for info in zip_file.infolist():
 
@@ -103,21 +129,16 @@ def scan_svg(zip_file, overrides):
         if path.suffix.lower() != ".svg":
             continue
 
-        style = path.parent.name
-
-        if style not in STYLES:
+        if not info.filename.startswith(folder + "/"):
             continue
 
         filename = path.name
 
-        cp = overrides.get(
-            (style, filename),
-            get_unicode(filename)
-        )
+        cp = overrides.get(filename, get_unicode(filename))
 
         if cp is None:
             report.append([
-                style,
+                folder,
                 info.filename,
                 "",
                 "無法從檔名判斷 Unicode"
@@ -126,23 +147,17 @@ def scan_svg(zip_file, overrides):
 
         if not (0 <= cp <= 0x10FFFF):
             report.append([
-                style,
-                info.filename,
-                "",
-                "Unicode 超出範圍"
+                folder, info.filename, "", "Unicode 超出範圍"
             ])
             continue
 
         if 0xD800 <= cp <= 0xDFFF:
             report.append([
-                style,
-                info.filename,
-                "",
-                "Unicode 為非法代理碼"
+                folder, info.filename, "", "Unicode 為非法代理碼"
             ])
             continue
 
-        result[style].append({
+        result.append({
             "info": info,
             "filename": filename,
             "codepoint": cp
@@ -152,8 +167,7 @@ def scan_svg(zip_file, overrides):
 
 
 
-def remove_conflicts(items, style, report):
-
+def remove_conflicts(items, folder, report):
     groups = defaultdict(list)
 
     for item in items:
@@ -162,17 +176,14 @@ def remove_conflicts(items, style, report):
     valid = []
 
     for cp, group in groups.items():
-
         if len(group) > 1:
-
             for item in group:
                 report.append([
-                    style,
+                    folder,
                     item["info"].filename,
                     "U+{:04X}".format(cp),
                     "Unicode 重複，需人工確認"
                 ])
-
             continue
 
         valid.append(group[0])
@@ -192,24 +203,22 @@ def get_glyph_width(cp):
 
     return 600
 
-def build_font(zip_file, style, items):
+def build_font(zip_file, folder, items, args):
 
     
-    config = STYLES[style]
 
     total = len(items)
 
     print("\n" + "=" * 60)
-    print("開始製作：", style)
     print("總 SVG 數量：", total)
     print("=" * 60)
 
     font = fontforge.font()
 
     font.encoding = "UnicodeFull"
-    font.familyname = config["family"]
-    font.fontname = config["fontname"]
-    font.fullname = config["family"]
+    font.familyname = args.family
+    font.fontname = args.fontname
+    font.fullname = args.family
 
     font.version = "1.0"
     font.weight = "Regular"
@@ -322,12 +331,17 @@ def build_font(zip_file, style, items):
     # 輸出字型
     print("[2/3] 正在產生 TTF...", flush=True)
 
+    os.makedirs(args.output_dir, exist_ok=True)
+
     output_path = os.path.join(
-        OUTPUT_DIR,
-        config["output"]
+        args.output_dir,
+        args.output
     )
 
     font.generate(output_path)
+
+    if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
+        raise RuntimeError("TTF 產生失敗或檔案為空")
 
     print("[3/3] 正在關閉 FontForge...", flush=True)
 
@@ -346,24 +360,19 @@ def build_font(zip_file, style, items):
 
 
 
-def save_report(report):
-
+def save_report(report, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(
-        OUTPUT_DIR,
+        output_dir,
         "import_report.csv"
     )
 
-    with open(
-        path,
-        "w",
-        newline="",
-        encoding="utf-8-sig"
-    ) as f:
+    with open(path,"w",newline="",encoding="utf-8-sig") as f:
 
         writer = csv.writer(f)
 
         writer.writerow([
-            "Style",
+            "Folder",
             "Original Filename",
             "Unicode",
             "Status"
@@ -375,42 +384,75 @@ def save_report(report):
 
 
 
-def main():
+def main(args):
 
     print("=" * 50)
     print("FontForge SVG Batch Import")
     print("=" * 50)
 
-    overrides = load_overrides()
+    os.makedirs(args.output_dir, exist_ok=True)
 
-    with zipfile.ZipFile(ZIP_PATH, "r") as z:
+    folder = args.folder.strip("/")
 
-        scanned, report = scan_svg(z, overrides)
+    overrides = load_overrides(args.output_dir, folder)
 
-        for style in STYLES:
+    with zipfile.ZipFile(args.zip, "r") as z:
 
-            items = remove_conflicts(
-                scanned[style],
-                style,
-                report
-            )
+        scanned, report = scan_svg(
+            z,
+            folder,
+            overrides
+        )
 
-            if not items:
-                print(
-                    "\n[警告] {} 沒有可匯入的 SVG".format(style)
-                )
-                continue
+        items = remove_conflicts(
+            scanned,
+            folder,
+            report
+        )
 
-            build_font(
-                z,
-                style,
-                items
-            )
+        print("\n指定資料夾：", folder)
+        print("可匯入 SVG：", len(items))
 
-    save_report(report)
+        if not items:
+            save_report(report, args.output_dir)
+            print("[錯誤] 沒有可匯入的 SVG")
+            return
+
+        imported, failed = build_font(
+            z,
+            folder,
+            items,
+            args
+        )
+
+    save_report(report, args.output_dir)
 
     print("\n所有字型製作流程結束！")
 
 
 if __name__ == "__main__":
-    main()
+
+    args = parse_args()
+
+    if args.list_folders:
+        list_zip_folders(args.zip)
+        sys.exit(0)
+
+    required = [
+        args.folder,
+        args.family,
+        args.fontname,
+        args.output
+    ]
+
+    if not all(required):
+        raise ValueError(
+            "請指定 --folder、--family、--fontname、--output"
+        )
+
+    if not os.path.isfile(args.zip):
+        raise FileNotFoundError(
+            f"找不到 ZIP 檔案：{args.zip}"
+        )
+
+    main(args)
