@@ -62,19 +62,33 @@ def list_zip_folders(zip_path):
         print(folder)
 
 def get_unicode(filename):
-
-
     stem = PurePosixPath(filename).stem
 
-    if len(stem) != 1:
-        return None
+    if stem.upper().startswith("U+"):
+        try:
+            codepoint = int(stem[2:], 16)
 
-    codepoint = ord(stem)
+            if not (0 <= codepoint <= 0x10FFFF):
+                return None
 
-    if 0xD800 <= codepoint <= 0xDFFF:
-        return None
+            if 0xD800 <= codepoint <= 0xDFFF:
+                return None
 
-    return codepoint
+            return codepoint
+
+        except ValueError:
+            return None
+
+
+    if len(stem) == 1:
+        codepoint = ord(stem)
+
+        if 0xD800 <= codepoint <= 0xDFFF:
+            return None
+
+        return codepoint
+
+    return None
 
 
 def glyph_name(codepoint):
@@ -204,8 +218,6 @@ def get_glyph_width(cp):
 
 def build_font(zip_file, folder, items, args):
 
-    
-
     total = len(items)
 
     print("\n" + "=" * 60)
@@ -214,7 +226,7 @@ def build_font(zip_file, folder, items, args):
 
     font = fontforge.font()
 
-    font.encoding = "UnicodeFull"
+    font.encoding = "CP950"
     font.familyname = args.family
     font.fontname = args.fontname
     font.fullname = args.family
