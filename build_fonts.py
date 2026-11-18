@@ -263,7 +263,8 @@ def build_font(zip_file, folder, items, args):
                 name = glyph_name(cp)
                 glyph = font.createChar(cp, name)
                 glyph.importOutlines(temp_svg)
-                glyph.width = get_glyph_width(cp)
+                if cp >= 0x0250:
+                    glyph.width = get_glyph_width(cp)
                 imported += 1
 
                 print(
@@ -327,18 +328,26 @@ def build_font(zip_file, folder, items, args):
     print("成功：", imported)
     print("失敗：", failed)
 
-    # 輪廓整理
     print("\n[1/3] 正在整理字型輪廓...", flush=True)
 
     try:
         font.selection.all()
         font.removeOverlap()
         font.correctDirection()
+        font.selection.none()
+        for cp in range(0x0021, 0x007F):
+            if cp in font:
+                font.selection.select(("more", None), cp)
+
+        font.autoWidth(100)
+
+
+        if 0x0020 in font:
+            font[0x0020].width = get_glyph_width(0x0020)
 
     except Exception as e:
         print("\n輪廓整理警告：", e)
 
-    # 輸出字型
     print("[2/3] 正在產生 TTF...", flush=True)
 
     os.makedirs(args.output_dir, exist_ok=True)
