@@ -19,7 +19,6 @@ EM_SIZE = 1000
 ASCENT = 800
 DESCENT = 200
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def parse_args():
     parser = argparse.ArgumentParser(
