@@ -179,7 +179,18 @@ def remove_conflicts(items, style, report):
 
     return valid
 
+def get_glyph_width(cp):
+    char = chr(cp)
 
+    east_asian_width = unicodedata.east_asian_width(char)
+
+    if east_asian_width in ("F", "W"):
+        return 1000
+
+    if east_asian_width == "A":
+        return 600
+
+    return 600
 
 def build_font(zip_file, style, items):
 
@@ -229,15 +240,11 @@ def build_font(zip_file, style, items):
 
                 with open(temp_svg, "wb") as target:
                     target.write(data)
-
+                
                 name = glyph_name(cp)
-
                 glyph = font.createChar(cp, name)
-
                 glyph.importOutlines(temp_svg)
-
-                glyph.autoWidth()
-
+                glyph.width = get_glyph_width(cp)
                 imported += 1
 
                 print(
