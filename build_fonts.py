@@ -21,6 +21,7 @@ DESCENT = 200
 
 
 MARGIN = 20                  
+REF_CANVAS = 900              
 FIT_SIZE = 900               
 
 
@@ -61,6 +62,25 @@ def parse_svg_contours(svg_text):
     if not contours:
         raise ValueError("SVG 裡沒有可用的輪廓")
     return contours
+
+
+def parse_canvas_size(svg_text):
+    m = re.search(r'viewBox\s*=\s*"([^"]*)"', svg_text)
+    if m:
+        nums = re.findall(r"-?\d*\.?\d+(?:[eE][-+]?\d+)?", m.group(1))
+        if len(nums) == 4:
+            w, h = abs(float(nums[2])), abs(float(nums[3]))
+            if max(w, h) > 0:
+                return max(w, h)
+
+    sizes = []
+    for attr in ("width", "height"):
+        m = re.search(r'<svg[^>]*\s' + attr + r'\s*=\s*"\s*(-?\d*\.?\d+)', svg_text)
+        if m:
+            sizes.append(abs(float(m.group(1))))
+    if sizes and max(sizes) > 0:
+        return max(sizes)
+    return None
 
 
 def layout_contours(contours, width, scale=1.0, fit=False):
@@ -125,6 +145,45 @@ def apply_vertical_metrics(font):
     font.os2_windescent = bottom
 
 
+def add_big5_cmap(ttf_path):
+    try:
+        from fontTools.ttLib import TTFont, newTable
+        from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
+    except ImportError:
+        print("[提示] 未安裝 fontTools，略過 Big5 對照表（pip install fonttools 後重跑即可）")
+        return
+
+    font = TTFont(ttf_path)
+    unicode_map = font.getBestCmap()
+
+    big5 = {}
+    for cp, glyph in unicode_map.items():
+        try:
+            raw = chr(cp).encode("cp950")
+        except UnicodeEncodeError:
+            continue
+        code = raw[0] if len(raw) == 1 else (raw[0] << 8) | raw[1]
+        big5[code] = glyph
+
+    if not big5:
+        font.close()
+        return
+
+    cmap = font["cmap"]
+    cmap.tables = [t for t in cmap.tables if (t.platformID, t.platEncID) != (3, 4)]
+
+    sub = CmapSubtable.newSubtable(4)
+    sub.platformID = 3
+    sub.platEncID = 4
+    sub.language = 0
+    sub.cmap = big5
+    cmap.tables.append(sub)
+
+    font.save(ttf_path)
+    font.close()
+    print("已加入 Big5(CP950) 對照表：{} 個字".format(len(big5)))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="FontForge ZIP 字型產生工具"
@@ -148,6 +207,9 @@ def parse_args():
     parser.add_argument("--output-dir",
                         default="output_fonts",
                         help="輸出資料夾")
+
+    parser.add_argument("--no-big5", action="store_true",
+                        help="不要在 TTF 內加入 Big5(CP950) 對照表（預設會加入，與 Unicode 對照表並存於同一個檔案）")
 
     parser.add_argument("--scale", type=float, default=1.0,
                         help="整體等比例縮放（預設 1.0 = 與 SVG 稿紙相同大小）")
@@ -337,7 +399,7 @@ def build_font(zip_file, folder, items, args):
 
     font = fontforge.font()
 
-    font.encoding = "CP950"
+    font.encoding = "UnicodeFull"
     font.familyname = args.family
     font.fontname = args.fontname
     font.fullname = args.family
@@ -363,14 +425,17 @@ def build_font(zip_file, folder, items, args):
             svg_text = zip_file.read(info).decode("utf-8")
             contours = parse_svg_contours(svg_text)
 
+            canvas = parse_canvas_size(svg_text)
+            unit = REF_CANVAS / canvas if canvas else 1.0
+
             width = get_glyph_width(cp)
-            contours, width = layout_contours(contours, width, args.scale, args.fit)
+            contours, width = layout_contours(contours, width, args.scale * unit, args.fit)
             widened = width > get_glyph_width(cp)
 
             glyph = font.createChar(cp, glyph_name(cp))
             glyph.clear()
-            glyph.width = width
             draw_contours(glyph, contours)
+            glyph.width = width   
 
             imported += 1
             if widened:
@@ -379,7 +444,9 @@ def build_font(zip_file, folder, items, args):
             print(
                 "[成功] {} -> U+{:04X}{}".format(
                     info.filename, cp,
-                    "（字較寬，已加寬字距）" if widened else ""
+                    ("（稿紙 {:g}，已換算 x{:.2f}）".format(canvas, unit)
+                     if canvas and abs(unit - 1) > 1e-6 else "")
+                    + ("（字較寬，已加寬字距）" if widened else "")
                 ),
                 flush=True
             )
@@ -456,6 +523,9 @@ def build_font(zip_file, folder, items, args):
     print("[3/3] 正在關閉 FontForge...", flush=True)
     font.close()
 
+    if not args.no_big5:
+        add_big5_cmap(output_path)
+
     print("\n" + "=" * 60)
     print("字型輸出完成：", output_path)
     print("成功：", imported)
@@ -525,12 +595,7 @@ def main(args):
             print("[錯誤] 沒有可匯入的 SVG")
             return
 
-        imported, failed = build_font(
-            z,
-            folder,
-            items,
-            args
-        )
+        build_font(z, folder, items, args)
 
     save_report(report, args.output_dir)
 
@@ -561,4 +626,5 @@ if __name__ == "__main__":
         raise FileNotFoundError(
             f"找不到 ZIP 檔案：{args.zip}"
         )
+
     main(args)
