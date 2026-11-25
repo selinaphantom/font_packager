@@ -18,11 +18,9 @@ EM_SIZE = 1000
 ASCENT = 800
 DESCENT = 200
 
-
-
 MARGIN = 20                  
-REF_CANVAS = 900            
-FIT_SIZE = 900             
+BOX_SIZE = 300                
+FIT_SIZE = 900               
 
 
 def parse_svg_contours(svg_text):
@@ -83,7 +81,7 @@ def parse_canvas_size(svg_text):
     return None
 
 
-def layout_contours(contours, width, scale=1.0, fit=False):
+def layout_contours(contours, width, scale=1.0, fit=False, pad=None):
     xs = [p[0] for c in contours for p in c]
     ys = [p[1] for c in contours for p in c]
     x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
@@ -97,8 +95,11 @@ def layout_contours(contours, width, scale=1.0, fit=False):
                for c in contours]
         return out, width
 
-    needed = int(round((x1 - x0) * scale + 2 * MARGIN))
-    width = max(width, needed)
+    ink = (x1 - x0) * scale
+    if pad is not None:
+        width = int(round(ink + 2 * pad))
+    else:
+        width = max(width, int(round(ink + 2 * MARGIN)))
 
     out = [[((x - cx) * scale + width / 2,
              em_center_y - (y - cy) * scale) for x, y in c]
@@ -116,7 +117,7 @@ def draw_contours(glyph, contours):
     pen = None
 
 
-def apply_vertical_metrics(font):
+def apply_vertical_metrics(font, pad=1):
     ymin, ymax = 0, 0
     for g in font.glyphs():
         bb = g.boundingBox()
@@ -125,8 +126,8 @@ def apply_vertical_metrics(font):
         ymin = min(ymin, bb[1])
         ymax = max(ymax, bb[3])
 
-    top = max(ASCENT, int(ymax) + 1)
-    bottom = max(DESCENT, int(-ymin) + 1)
+    top = max(ASCENT, int(ymax + pad) + 1)
+    bottom = max(DESCENT, int(-ymin + pad) + 1)
 
     font.hhea_ascent_add = False
     font.hhea_descent_add = False
@@ -184,23 +185,6 @@ def add_big5_cmap(ttf_path):
     print("已加入 Big5(CP950) 對照表：{} 個字".format(len(big5)))
 
 
-def parse_canvas_scale(text):
-    mapping = {}
-    for part in text.split(","):
-        key, value = part.split("=")
-        mapping[float(key)] = float(value)
-    return mapping
-
-
-def canvas_unit(canvas, mapping):
-    if not canvas:
-        return 1.0
-    for size, factor in mapping.items():
-        if abs(size - canvas) < 0.5:
-            return factor
-    return REF_CANVAS / canvas
-
-
 def set_office_metadata(font, args):
     # 字碼頁：Latin 1 (bit 0) + 繁體中文 CP950 (bit 20)
     font.os2_codepages = (1 | (1 << 20), 0)
@@ -246,8 +230,14 @@ def parse_args():
                         default="output_fonts",
                         help="輸出資料夾")
 
-    parser.add_argument("--canvas-scale", type=parse_canvas_scale, default={},
-                        help='依稿紙大小指定倍率，例如 "900=3,300=1"；未指定則依比例換算到 900 稿紙')
+    parser.add_argument("--box-size", type=float, default=BOX_SIZE,
+                        help="田字格大小（預設 300）：此大小會對應到整個字框（1000）")
+
+    parser.add_argument("--pad", type=float, default=50,
+                        help="字寬 = 字的實際寬度 + 左右各 pad；行高 = 最高的字 + 上下各 pad（預設 50）")
+
+    parser.add_argument("--fixed-width", action="store_true",
+                        help="改回固定字寬（至少 1000），不依字的大小調整")
 
     parser.add_argument("--no-big5", action="store_true",
                         help="不要在 TTF 內加入 Big5(CP950) 對照表（預設會加入，與 Unicode 對照表並存於同一個檔案）")
@@ -453,7 +443,6 @@ def build_font(zip_file, folder, items, args):
 
     imported = 0
     failed = 0
-    shrunk_names = []
     start_time = time.time()
 
     for index, item in enumerate(items, start=1):
@@ -467,27 +456,23 @@ def build_font(zip_file, folder, items, args):
             contours = parse_svg_contours(svg_text)
 
             canvas = parse_canvas_size(svg_text)
-            unit = canvas_unit(canvas, args.canvas_scale)
+            unit = EM_SIZE / args.box_size
 
             width = get_glyph_width(cp)
-            contours, width = layout_contours(contours, width, args.scale * unit, args.fit)
-            widened = width > get_glyph_width(cp)
-
+            contours, width = layout_contours(contours, width, args.scale * unit, args.fit,
+                                        None if args.fixed_width else args.pad)
+            
             glyph = font.createChar(cp, glyph_name(cp))
             glyph.clear()
             draw_contours(glyph, contours)
-            glyph.width = width   # 必須在畫完輪廓之後設定，否則會被重設
+            glyph.width = width   
 
             imported += 1
-            if widened:
-                shrunk_names.append(info.filename)
-
             print(
                 "[成功] {} -> U+{:04X}{}".format(
                     info.filename, cp,
-                    ("（稿紙 {:g}，已換算 x{:.2f}）".format(canvas, unit)
-                     if canvas and abs(unit - 1) > 1e-6 else "")
-                    + ("（字較寬，已加寬字距）" if widened else "")
+                    ("（稿紙 {:g}）".format(canvas) if canvas else "")
+                    + "（字寬 {}）".format(width)
                 ),
                 flush=True
             )
@@ -527,8 +512,6 @@ def build_font(zip_file, folder, items, args):
     print("\n\nSVG 匯入完成！")
     print("成功：", imported)
     print("失敗：", failed)
-    if shrunk_names:
-        print("字較寬而加寬字距的字：", len(shrunk_names))
 
     print("\n[1/3] 正在整理字型輪廓...", flush=True)
 
@@ -547,7 +530,7 @@ def build_font(zip_file, folder, items, args):
         if 0x0020 in font:
             font[0x0020].width = get_glyph_width(0x0020)
 
-        apply_vertical_metrics(font)
+        apply_vertical_metrics(font, 1 if args.fixed_width else args.pad)
 
     except Exception as e:
         print("\n輪廓整理警告：", e)
