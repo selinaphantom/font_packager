@@ -225,7 +225,7 @@ def build_font(zip_file, folder, items, args):
 
     font = fontforge.font()
 
-    font.encoding = "CP950"
+    font.encoding = "UnicodeFull"
     font.familyname = args.family
     font.fontname = args.fontname
     font.fullname = args.family
