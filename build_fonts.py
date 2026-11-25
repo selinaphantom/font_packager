@@ -21,8 +21,8 @@ DESCENT = 200
 
 
 MARGIN = 20                  
-REF_CANVAS = 900              
-FIT_SIZE = 900               
+REF_CANVAS = 900            
+FIT_SIZE = 900             
 
 
 def parse_svg_contours(svg_text):
@@ -184,6 +184,44 @@ def add_big5_cmap(ttf_path):
     print("已加入 Big5(CP950) 對照表：{} 個字".format(len(big5)))
 
 
+def parse_canvas_scale(text):
+    mapping = {}
+    for part in text.split(","):
+        key, value = part.split("=")
+        mapping[float(key)] = float(value)
+    return mapping
+
+
+def canvas_unit(canvas, mapping):
+    if not canvas:
+        return 1.0
+    for size, factor in mapping.items():
+        if abs(size - canvas) < 0.5:
+            return factor
+    return REF_CANVAS / canvas
+
+
+def set_office_metadata(font, args):
+    # 字碼頁：Latin 1 (bit 0) + 繁體中文 CP950 (bit 20)
+    font.os2_codepages = (1 | (1 << 20), 0)
+    # fsSelection 的 REGULAR 位元
+    font.os2_stylemap = 0x40
+
+    # 名稱：英文名用 ASCII，中文名放在 Chinese (Taiwan) 語系
+    if any(ord(c) > 127 for c in args.family):
+        ascii_family = args.fontname.split("-")[0]
+        font.familyname = ascii_family
+        font.fullname = ascii_family
+        font.appendSFNTName("Chinese (Taiwan)", "Family", args.family)
+        font.appendSFNTName("Chinese (Taiwan)", "Fullname", args.family)
+
+    # 空白字形：避免 Word 打空白時改用別的字型
+    for cp, w in ((0x0020, get_glyph_width(0x0020)), (0x3000, 1000)):
+        if cp not in font:
+            g = font.createChar(cp, glyph_name(cp))
+            g.width = w
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="FontForge ZIP 字型產生工具"
@@ -207,6 +245,9 @@ def parse_args():
     parser.add_argument("--output-dir",
                         default="output_fonts",
                         help="輸出資料夾")
+
+    parser.add_argument("--canvas-scale", type=parse_canvas_scale, default={},
+                        help='依稿紙大小指定倍率，例如 "900=3,300=1"；未指定則依比例換算到 900 稿紙')
 
     parser.add_argument("--no-big5", action="store_true",
                         help="不要在 TTF 內加入 Big5(CP950) 對照表（預設會加入，與 Unicode 對照表並存於同一個檔案）")
@@ -426,7 +467,7 @@ def build_font(zip_file, folder, items, args):
             contours = parse_svg_contours(svg_text)
 
             canvas = parse_canvas_size(svg_text)
-            unit = REF_CANVAS / canvas if canvas else 1.0
+            unit = canvas_unit(canvas, args.canvas_scale)
 
             width = get_glyph_width(cp)
             contours, width = layout_contours(contours, width, args.scale * unit, args.fit)
@@ -435,7 +476,7 @@ def build_font(zip_file, folder, items, args):
             glyph = font.createChar(cp, glyph_name(cp))
             glyph.clear()
             draw_contours(glyph, contours)
-            glyph.width = width   
+            glyph.width = width   # 必須在畫完輪廓之後設定，否則會被重設
 
             imported += 1
             if widened:
@@ -510,6 +551,11 @@ def build_font(zip_file, folder, items, args):
 
     except Exception as e:
         print("\n輪廓整理警告：", e)
+
+    try:
+        set_office_metadata(font, args)
+    except Exception as e:
+        print("\nWord 相容設定警告：", e)
 
     print("[2/3] 正在產生 TTF...", flush=True)
 
